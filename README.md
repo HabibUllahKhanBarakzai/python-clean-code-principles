@@ -8,7 +8,7 @@ The principles apply to Django, FastAPI, Flask, CLIs, workers, libraries, and in
 
 | Skill | What it covers |
 | --- | --- |
-| [`writing-clean-python-code`](skills/writing-clean-python-code/SKILL.md) | Domain language, separating the write flow, normalizing input, typing for intent, domain values over primitives, early validation, first-class edge cases, precise persistence, safe side-effect ordering, and behavior-focused tests. |
+| [`clean-python-code`](skills/clean-python-code/SKILL.md) | Domain language, separating the write flow, normalizing input, typing for intent, domain values over primitives, early validation, first-class edge cases, precise persistence, safe side-effect ordering, and behavior-focused tests. |
 | [`clean-python-architecture`](skills/clean-python-architecture/SKILL.md) | Organizing by domain capability, thin boundaries, typed read models, intentional data loading, integrations behind interfaces, sync vs. async work, action modules, typed problems, explicit dependencies, and putting tests near behavior. |
 
 ## Using these as Claude Code skills

@@ -438,6 +438,126 @@ Do not add a layer just to satisfy a pattern name.
 
 Bad architecture hides behavior behind abstract names. Good architecture makes behavior easier to find.
 
+## 16. Route Reads And Writes Deliberately
+
+At scale, reads go to replicas and writes go to the primary. Whatever the stack — database routers, session factories, or plain connection pools — architecture should make the safe path the default and the unsafe path explicit.
+
+A pattern that works well:
+
+- Reads use a read-only connection or session by default.
+- Writer access requires an explicit opt-in (an `allow_writer()` context manager or decorator, or a dedicated `writer_session()` factory) so it is visible in review.
+- Test settings or middleware raise on writer access that was not explicitly allowed, turning silent replication mistakes into loud failures.
+- Helpers that spawn related queries reuse the caller's connection instead of hardcoding one.
+
+```python
+@background_task
+@allow_writer()
+def delete_expired_report_exports() -> None:
+    ...
+```
+
+Even before a replica exists, this discipline documents which code paths mutate state.
+
+## 17. Make Boundary Pipelines Reusable
+
+When a system has many endpoints, each boundary should follow the same step pipeline, enforced by a shared base class rather than convention. The same shape works for REST handlers, GraphQL mutations, CLI commands, and message consumers.
+
+A write-endpoint base class with overridable steps:
+
+```python
+class WriteEndpoint:
+    def perform(self, actor: Actor, raw_input: dict) -> Response:
+        self.check_permissions(actor)
+        target = self.get_target(raw_input)
+        cleaned_input = self.clean_input(target, raw_input)
+        self.validate(target, cleaned_input)
+        result = self.apply(target, cleaned_input)
+        self.persist(result)
+        self.emit_side_effects(result, cleaned_input)
+        return self.build_response(result)
+```
+
+Each endpoint overrides only the steps it needs (`clean_input` for input rules, `emit_side_effects` for events). The pipeline order — permissions, resolve, validate, mutate, persist, side effects — is decided once and cannot be reordered by accident.
+
+## 18. Put Query Vocabulary On Query Objects
+
+Domain filters belong on custom querysets, repositories, or query-builder objects, named in business language, so every caller applies the same rule:
+
+```python
+class ReportQuery:
+    def published(self, workspace: Workspace) -> "ReportQuery":
+        if not workspace.is_active:
+            return self.none()
+        ...
+
+    def visible_to_user(
+        self, requestor: User | ApiClient | None, workspace: Workspace | None
+    ) -> "ReportQuery":
+        ...
+```
+
+Benefits:
+
+- Visibility and publication rules exist in exactly one place.
+- Callers compose them: `ReportQuery().published(workspace).visible_to_user(requestor, workspace)`.
+- Guard clauses like `return self.none()` for an inactive workspace make edge cases part of the query API instead of scattered `if` checks.
+
+If two boundaries filter the same concept with hand-written filter expressions, that filter is missing its query method.
+
+## 19. Treat Migrations As Architecture
+
+Schema changes ship to databases with live traffic. The rules below apply to any migration tool — Django migrations, Alembic, or hand-rolled SQL scripts:
+
+- Separate schema migrations from data migrations. Schema changes should be fast and lock-light; data backfills are their own migration or a post-deploy task.
+- Batch data migrations with keyset pagination and lock each batch, so a backfill over millions of rows neither exhausts memory nor blocks writers for the whole table.
+- Make every data migration reversible, even if the reverse is an explicit no-op, so environments can roll back.
+- Never import application models or helpers inside a migration. Use the migration tool's schema snapshot (Django's `apps.get_model`, or table definitions declared inside an Alembic revision), because the application code will evolve past the schema this migration ran against.
+- For backfills too large to run during deploy, keep versioned post-deploy tasks (for example `migrations/tasks/v3_21.py`) triggered after release.
+
+```python
+def backfill_unconfirmed_users(schema_snapshot) -> None:
+    users = schema_snapshot.table("users")
+    last_id = 0
+    while True:
+        ids = fetch_ids_to_backfill(users, after_id=last_id, limit=5000)
+        if not ids:
+            break
+        with begin_transaction():
+            lock_rows(users, ids)
+            set_is_confirmed(users, ids, False)
+        last_id = ids[-1]
+
+
+migration = DataMigration(
+    forward=backfill_unconfirmed_users,
+    reverse=no_op,
+)
+```
+
+## 20. Register Events In One Map
+
+When a domain emits many event types, keep the mapping from event name to handler in one constant, and fail fast on unknown events:
+
+```python
+INVOICE_EVENT_MAP = {
+    InvoiceEvent.CREATED: publish_invoice_created,
+    InvoiceEvent.APPROVED: publish_invoice_approved,
+    InvoiceEvent.FULLY_PAID: publish_invoice_fully_paid,
+}
+
+
+def call_invoice_event(event: InvoiceEvent, invoice: Invoice) -> None:
+    if event not in INVOICE_EVENT_MAP:
+        raise ValueError(f"Event {event} not found in INVOICE_EVENT_MAP.")
+    ...
+```
+
+This gives the system:
+
+- One place listing every event a domain can emit.
+- A loud failure when a new event is wired incompletely, instead of a silently dropped webhook.
+- A natural spot for shared optimizations, such as fetching subscribers for several events in one query before dispatching.
+
 ## Suggested Repository Shape
 
 For a Python backend, start with this shape and adapt it to the domain:
@@ -499,6 +619,11 @@ Before merging a structural change, ask:
 - Are problems and state transitions named explicitly?
 - Is shared code genuinely shared?
 - Are important dependencies visible in function signatures?
+- Are reads and writes routed deliberately, with writer access explicit?
+- Do boundaries share one step pipeline instead of ad-hoc ordering?
+- Do domain filters live on querysets or repositories, named in business language?
+- Are data migrations batched, reversible, and safe under live traffic?
+- Are a domain's events registered in one place that fails fast on unknown events?
 - Does the test location match the behavior being tested?
 - Did this abstraction remove real complexity, or just add indirection?
 
